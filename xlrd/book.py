@@ -71,7 +71,8 @@ def open_workbook_xls(filename=None,
                       logfile=sys.stdout, verbosity=0, use_mmap=USE_MMAP,
                       file_contents=None,
                       encoding_override=None,
-                      formatting_info=False, on_demand=False, ragged_rows=False):
+                      formatting_info=False, on_demand=False, ragged_rows=False,
+                      ignore_workbook_corruption=False):
     t0 = perf_counter()
     if TOGGLE_GC:
         orig_gc_enabled = gc.isenabled()
@@ -86,6 +87,7 @@ def open_workbook_xls(filename=None,
             formatting_info=formatting_info,
             on_demand=on_demand,
             ragged_rows=ragged_rows,
+            ignore_workbook_corruption=ignore_workbook_corruption
         )
         t1 = perf_counter()
         bk.load_time_stage_1 = t1 - t0
@@ -465,6 +467,14 @@ class Book(BaseObject):
         """
         return self._sheet_list[sheetx] or self.get_sheet(sheetx)
 
+    def __iter__(self):
+        """
+        Makes iteration through sheets of a book a little more straightforward.
+        Don't free resources after use since it can be called like `list(book)`
+        """
+        for i in range(self.nsheets):
+            yield self.sheet_by_index(i)
+
     def sheet_by_name(self, sheet_name):
         """
         :param sheet_name: Name of the sheet required.
@@ -475,6 +485,17 @@ class Book(BaseObject):
         except ValueError:
             raise XLRDError('No sheet named <%r>' % sheet_name)
         return self.sheet_by_index(sheetx)
+
+    def __getitem__(self, item):
+        """
+        Allow indexing with sheet name or index.
+        :param item: Name or index of sheet enquired upon
+        :return: :class:`~xlrd.sheet.Sheet`.
+        """
+        if isinstance(item, int):
+            return self.sheet_by_index(item)
+        else:
+            return self.sheet_by_name(item)
 
     def sheet_names(self):
         """
@@ -597,7 +618,9 @@ class Book(BaseObject):
                      encoding_override=None,
                      formatting_info=False,
                      on_demand=False,
-                     ragged_rows=False):
+                     ragged_rows=False,
+                     ignore_workbook_corruption=False
+                     ):
         # DEBUG = 0
         self.logfile = logfile
         self.verbosity = verbosity
@@ -629,7 +652,8 @@ class Book(BaseObject):
             # got this one at the antique store
             self.mem = self.filestr
         else:
-            cd = compdoc.CompDoc(self.filestr, logfile=self.logfile)
+            cd = compdoc.CompDoc(self.filestr, logfile=self.logfile,
+                                 ignore_workbook_corruption=ignore_workbook_corruption)
             if USE_FANCY_CD:
                 for qname in ['Workbook', 'Book']:
                     self.mem, self.base, self.stream_len = \
@@ -796,8 +820,8 @@ class Book(BaseObject):
         elif self.codepage is None:
             if self.biff_version < 80:
                 fprintf(self.logfile,
-                    "*** No CODEPAGE record, no encoding_override: will use 'ascii'\n")
-                self.encoding = 'ascii'
+                    "*** No CODEPAGE record, no encoding_override: will use 'iso-8859-1'\n")
+                self.encoding = 'iso-8859-1'
             else:
                 self.codepage = 1200 # utf16le
                 if self.verbosity >= 2:
@@ -808,6 +832,9 @@ class Book(BaseObject):
                 encoding = encoding_from_codepage[codepage]
             elif 300 <= codepage <= 1999:
                 encoding = 'cp' + str(codepage)
+            elif self.biff_version >= 80:
+                self.codepage = 1200
+                encoding = 'utf_16_le'
             else:
                 encoding = 'unknown_codepage_' + str(codepage)
             if DEBUG or (self.verbosity and encoding != self.encoding) :
@@ -1189,7 +1216,7 @@ class Book(BaseObject):
                 return
             strg = unpack_string(data, 0, self.encoding, lenlen=1)
         else:
-            strg = unpack_unicode(data, 0, lenlen=2)
+            strg = unpack_unicode(data.strip(), 0, lenlen=2)
         if DEBUG: fprintf(self.logfile, "WRITEACCESS: %d bytes; raw=%s %r\n", len(data), self.raw_user_name, strg)
         strg = strg.rstrip()
         self.user_name = strg
